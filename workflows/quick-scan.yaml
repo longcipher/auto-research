@@ -1,0 +1,39 @@
+name: quick-scan
+description: Quick search-only research pipeline
+version: "0.1.0"
+triggers:
+  - type: manual
+inputs:
+  query:
+    type: string
+  depth:
+    type: string
+    default: quick
+steps:
+  plan:
+    agent: planner
+    prompt: "Create a research brief for the query"
+    inputs:
+      query: "{{ inputs.query }}"
+      depth: "{{ inputs.depth }}"
+    outputs:
+      brief: brief_data
+  search:
+    agent: searcher
+    depends_on:
+      - plan
+    prompt: "Execute web searches based on the plan"
+    inputs:
+      queries: "{{ steps.plan.outputs.search_queries }}"
+    outputs:
+      results: search_results
+  synthesize:
+    agent: synthesizer
+    depends_on:
+      - search
+    prompt: "Synthesize search results into a research report"
+    inputs:
+      readings: "{{ steps.search.outputs.readings }}"
+      brief: "{{ steps.plan.outputs.brief }}"
+    outputs:
+      draft: draft_report

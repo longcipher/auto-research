@@ -1,0 +1,57 @@
+name: deep-research
+description: Full deep research pipeline with reading and fact-checking
+version: "0.1.0"
+triggers:
+  - type: manual
+inputs:
+  query:
+    type: string
+  depth:
+    type: string
+    default: deep
+steps:
+  plan:
+    agent: planner
+    prompt: "Create a research brief for the query"
+    inputs:
+      query: "{{ inputs.query }}"
+      depth: "{{ inputs.depth }}"
+    outputs:
+      brief: brief_data
+  search:
+    agent: searcher
+    depends_on:
+      - plan
+    prompt: "Execute web searches based on the plan"
+    inputs:
+      queries: "{{ steps.plan.outputs.search_queries }}"
+    outputs:
+      results: search_results
+  read:
+    agent: reader
+    depends_on:
+      - search
+    prompt: "Read and extract content from search results"
+    inputs:
+      urls: "{{ steps.search.outputs.urls }}"
+    outputs:
+      readings: reading_notes
+  synthesize:
+    agent: synthesizer
+    depends_on:
+      - read
+    prompt: "Synthesize readings into a research report"
+    inputs:
+      readings: "{{ steps.read.outputs.readings }}"
+      brief: "{{ steps.plan.outputs.brief }}"
+    outputs:
+      draft: draft_report
+  fact_check:
+    agent: fact_checker
+    depends_on:
+      - synthesize
+    prompt: "Fact-check the draft report"
+    inputs:
+      draft: "{{ steps.synthesize.outputs.draft }}"
+    outputs:
+      report: fact_check_report

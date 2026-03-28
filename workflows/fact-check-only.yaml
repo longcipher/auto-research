@@ -1,0 +1,16 @@
+name: fact-check-only
+description: Standalone fact-checking pipeline for an existing draft
+version: "0.1.0"
+triggers:
+  - type: manual
+inputs:
+  draft:
+    type: string
+steps:
+  fact_check:
+    agent: fact_checker
+    prompt: "Fact-check the provided draft document"
+    inputs:
+      draft: "{{ inputs.draft }}"
+    outputs:
+      report: fact_check_report
