@@ -29,7 +29,7 @@ class TestSearchResult:
     def test_frozen(self) -> None:
         r = SearchResult(title="t", url="https://x", snippet="s", score=0.9)
         with pytest.raises(AttributeError):
-            setattr(r, "title", "other")
+            r.title = "other"  # ty: ignore[invalid-assignment]
 
 
 # ── WebSearchTool basic interface ────────────────────────────────────────

@@ -5,7 +5,7 @@ from __future__ import annotations
 import pathlib
 from collections import defaultdict
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any
 
 import msgspec
 import orjson
@@ -13,8 +13,18 @@ import structlog
 import yaml
 
 from autoresearch.config.schema import MemoryConfig
+from autoresearch.engine.io import async_write_bytes, async_write_text
 from autoresearch.engine.memory import MemoryManager, SessionRecord
 from autoresearch.engine.state import StateManager
+from autoresearch.models.agent_outputs import (
+    FactCheckerOutput,
+    PlannerOutput,
+    ReaderOutput,
+    SearcherOutput,
+    SynthesizerOutput,
+    convert_from_typed_output,
+    convert_to_typed_output,
+)
 from autoresearch.models.types import TaskStatus
 
 logger = structlog.get_logger()
@@ -22,6 +32,18 @@ logger = structlog.get_logger()
 _WORKFLOWS_DIR = pathlib.Path(__file__).resolve().parent.parent.parent.parent / "workflows"
 
 _MAX_REVISION_ROUNDS = 3
+
+
+class OutputHandler:
+    """Protocol for output packaging handlers."""
+
+    def package(
+        self,
+        task_dir: pathlib.Path,
+        step_outputs: dict[str, Any],
+    ) -> None:
+        """Package outputs based on the workflow definition."""
+        raise NotImplementedError
 
 
 class WorkflowStep(msgspec.Struct):
@@ -44,6 +66,44 @@ class WorkflowDefinition(msgspec.Struct):
     triggers: list[dict[str, str]] = msgspec.field(default_factory=list)
     inputs: dict[str, Any] = msgspec.field(default_factory=dict)
     steps: dict[str, WorkflowStep] = msgspec.field(default_factory=dict)
+
+
+class DefaultOutputHandler:
+    """Default output handler that uses workflow-defined output configurations."""
+
+    def package(
+        self,
+        task_dir: pathlib.Path,
+        step_outputs: dict[str, Any],
+    ) -> None:
+        """Package outputs based on the workflow definition."""
+        sources: list[dict[str, Any]] = []
+
+        for output in step_outputs.values():
+            if isinstance(output, SearcherOutput):
+                for results in output.results.values():
+                    if isinstance(results, list):
+                        for item in results:
+                            if isinstance(item, dict):
+                                sources.append(item)
+
+            if isinstance(output, ReaderOutput):
+                for reading in output.readings:
+                    if isinstance(reading, dict):
+                        rd = reading
+                        if rd not in sources:
+                            sources.append(rd)
+
+        sources_path = task_dir / "sources.json"
+        sources_path.write_bytes(orjson.dumps(sources, option=orjson.OPT_INDENT_2))
+
+        task_json = task_dir / "task.json"
+        task_json.write_bytes(
+            orjson.dumps(
+                {"id": task_dir.name, "status": "DONE", "created_at": datetime.now(UTC).isoformat()},
+                option=orjson.OPT_INDENT_2,
+            )
+        )
 
 
 def parse_workflow(path: pathlib.Path) -> WorkflowDefinition:
@@ -118,12 +178,12 @@ async def execute_step(
     """
     agent = agents.get(step.agent)
     if agent is None:
-        raise KeyError(f"No agent registered for step '{step_name}': '{step.agent}'")
+        msg = f"No agent registered for step '{step_name}': '{step.agent}'"
+        raise KeyError(msg)
     logger.info("executing_step", step=step_name, agent=step.agent)
 
     kwargs: dict[str, object] = {"prompt": step.prompt}
 
-    # Pass step outputs from dependencies as kwargs to the agent
     if step_outputs:
         for dep in step.depends_on:
             dep_outputs = step_outputs.get(dep, {})
@@ -133,64 +193,49 @@ async def execute_step(
     return await agent.execute(task_dir, **kwargs)
 
 
-# ---------------------------------------------------------------------------
-# Output packaging
-# ---------------------------------------------------------------------------
-
-
-def _package_outputs(
+async def _package_outputs_async(
     task_dir: pathlib.Path,
-    step_outputs: dict[str, dict[str, object]],
+    step_outputs: dict[str, Any],
     workflow_name: str,
 ) -> None:
-    """Produce report.md and sources.json from pipeline outputs."""
-    # Build report.md from synthesizer output or fallback to step summary
-    synth_step = step_outputs.get("synthesize", {})
-    draft_path_str = ""
-    if isinstance(synth_step, dict):
-        raw_path = synth_step.get("draft_path", "")
-        draft_path_str = str(raw_path) if raw_path else ""
-    if draft_path_str:
-        draft_path = pathlib.Path(draft_path_str)
-        if not draft_path.is_absolute():
-            draft_path = task_dir / draft_path.name
-        if draft_path.exists():
-            report_content = draft_path.read_text(encoding="utf-8")
-        else:
-            report_content = _build_fallback_report(step_outputs, workflow_name)
-    else:
-        report_content = _build_fallback_report(step_outputs, workflow_name)
+    """Produce report.md and sources.json from pipeline outputs (async version)."""
+    report_content = _build_report(step_outputs, workflow_name)
 
     report_path = task_dir / "report.md"
-    report_path.write_text(report_content, encoding="utf-8")
+    await async_write_text(report_path, report_content)
 
-    # Build sources.json from search and reader results
     sources: list[dict[str, Any]] = []
 
-    search_step = step_outputs.get("search", {})
-    if isinstance(search_step, dict):
-        search_results = search_step.get("results", {})
-        if isinstance(search_results, dict):
-            for results in search_results.values():
+    for step_name, output in step_outputs.items():
+        if isinstance(output, SearcherOutput) and hasattr(output, "results"):
+            for results in output.results.values():
                 if isinstance(results, list):
                     for item in results:
                         if isinstance(item, dict):
-                            sources.append(cast("dict[str, Any]", item))
+                            sources.append(item)
+        elif isinstance(output, dict) and step_name == "search" and "results" in output:
+            results_dict = output.get("results", {})
+            if isinstance(results_dict, dict):
+                for results in results_dict.values():
+                    if isinstance(results, list):
+                        for item in results:
+                            if isinstance(item, dict):
+                                sources.append(item)
 
-    read_step = step_outputs.get("read", {})
-    if isinstance(read_step, dict):
-        readings = read_step.get("readings", [])
-        if isinstance(readings, list):
-            for reading in readings:
-                if isinstance(reading, dict):
-                    rd = cast("dict[str, Any]", reading)
-                    if rd not in sources:
-                        sources.append(rd)
+        if isinstance(output, ReaderOutput) and hasattr(output, "readings"):
+            for reading in output.readings:
+                if isinstance(reading, dict) and reading not in sources:
+                    sources.append(reading)
+        elif isinstance(output, dict) and step_name == "read" and "readings" in output:
+            readings = output.get("readings", [])
+            if isinstance(readings, list):
+                for reading in readings:
+                    if isinstance(reading, dict) and reading not in sources:
+                        sources.append(reading)
 
     sources_path = task_dir / "sources.json"
-    sources_path.write_bytes(orjson.dumps(sources, option=orjson.OPT_INDENT_2))
+    await async_write_bytes(sources_path, orjson.dumps(sources, option=orjson.OPT_INDENT_2))
 
-    # Write task.json
     task_json = task_dir / "task.json"
     task_data = {
         "id": task_dir.name,
@@ -198,75 +243,119 @@ def _package_outputs(
         "status": "DONE",
         "created_at": datetime.now(UTC).isoformat(),
     }
-    task_json.write_bytes(orjson.dumps(task_data, option=orjson.OPT_INDENT_2))
+    await async_write_bytes(task_json, orjson.dumps(task_data, option=orjson.OPT_INDENT_2))
 
     logger.info("outputs_packaged", task_dir=str(task_dir), sources_count=len(sources))
 
 
-def _get_str(d: dict[str, Any], key: str, default: str = "") -> str:
-    """Safely extract a string value from an untyped dict."""
-    val = d.get(key, default)
-    return val if isinstance(val, str) else str(val)
-
-
-def _build_fallback_report(
-    step_outputs: dict[str, dict[str, object]],
+def _build_report(
+    step_outputs: dict[str, Any],
     _workflow_name: str,
 ) -> str:
-    """Build a fallback report.md when no draft file is available."""
+    """Build a report.md from available outputs."""
     lines: list[str] = []
     lines.append("# Research Report\n")
 
-    brief = step_outputs.get("plan", {})
-    if isinstance(brief, dict):
-        sub_questions = brief.get("sub_questions", [])
-        if isinstance(sub_questions, list) and sub_questions:
+    for step_name, output in step_outputs.items():
+        if isinstance(output, dict) and step_name == "synthesize" and "draft_path" in output:
+            draft_path_str = output.get("draft_path", "")
+            if draft_path_str:
+                draft_path = pathlib.Path(draft_path_str)
+                if draft_path.exists():
+                    try:
+                        return draft_path.read_text(encoding="utf-8")
+                    except OSError:
+                        pass
+
+        if isinstance(output, SynthesizerOutput) and output.draft_path:
+            draft_path = pathlib.Path(output.draft_path)
+            if draft_path.exists():
+                try:
+                    return draft_path.read_text(encoding="utf-8")
+                except OSError:
+                    pass
+
+    lines.extend(_build_fallback_report_content(step_outputs))
+    return "\n".join(lines)
+
+
+def _build_fallback_report_content(step_outputs: dict[str, Any]) -> list[str]:
+    """Build fallback report content from available outputs."""
+    lines: list[str] = []
+
+    for step_name, output in step_outputs.items():
+        if isinstance(output, dict):
+            if step_name == "plan":
+                sub_questions = output.get("sub_questions", [])
+                if sub_questions:
+                    lines.append("## Research Questions\n")
+                    for sq in sub_questions:
+                        lines.append(f"- {sq}")
+                    lines.append("")
+
+            if step_name == "search":
+                results = output.get("results", {})
+                if results:
+                    lines.append("## Search Results\n")
+                    for query, res_list in results.items():
+                        lines.append(f"### {query}\n")
+                        if isinstance(res_list, list):
+                            for r in res_list:
+                                if isinstance(r, dict):
+                                    title = r.get("title", "Untitled")
+                                    url = r.get("url", "")
+                                    snippet = r.get("snippet", "")
+                                    lines.append(f"- [{title}]({url})")
+                                    if snippet:
+                                        lines.append(f"  {snippet}")
+                    lines.append("")
+
+            if step_name == "read":
+                readings = output.get("readings", [])
+                if readings:
+                    lines.append("## Readings\n")
+                    for r in readings:
+                        if isinstance(r, dict):
+                            title = r.get("title", "Untitled")
+                            content = r.get("content", "")
+                            lines.append(f"### {title}\n")
+                            lines.append(f"{content}\n")
+
+        if isinstance(output, PlannerOutput) and hasattr(output, "sub_questions") and output.sub_questions:
             lines.append("## Research Questions\n")
-            for sq in sub_questions:
-                if isinstance(sq, str):
-                    lines.append(f"- {sq}")
+            for sq in output.sub_questions:
+                lines.append(f"- {sq}")
             lines.append("")
 
-    search = step_outputs.get("search", {})
-    if isinstance(search, dict):
-        results = search.get("results", {})
-        if isinstance(results, dict) and results:
+        if isinstance(output, SearcherOutput) and hasattr(output, "results") and output.results:
             lines.append("## Search Results\n")
-            for query, res_list in results.items():
-                if not isinstance(query, str):
-                    continue
+            for query, res_list in output.results.items():
                 lines.append(f"### {query}\n")
                 if isinstance(res_list, list):
                     for r in res_list:
                         if isinstance(r, dict):
-                            rd = cast("dict[str, Any]", r)
-                            title_s = _get_str(rd, "title", "Untitled")
-                            url_s = _get_str(rd, "url", "")
-                            lines.append(f"- [{title_s}]({url_s})")
-                            snippet = rd.get("snippet")
-                            if isinstance(snippet, str):
+                            title = r.get("title", "Untitled")
+                            url = r.get("url", "")
+                            snippet = r.get("snippet", "")
+                            lines.append(f"- [{title}]({url})")
+                            if snippet:
                                 lines.append(f"  {snippet}")
             lines.append("")
 
-    readings = step_outputs.get("read", {})
-    if isinstance(readings, dict):
-        reading_list = readings.get("readings", [])
-        if isinstance(reading_list, list) and reading_list:
+        if isinstance(output, ReaderOutput) and output.readings:
             lines.append("## Readings\n")
-            for r in reading_list:
+            for r in output.readings:
                 if isinstance(r, dict):
-                    rd2 = cast("dict[str, Any]", r)
-                    title_s = _get_str(rd2, "title", "Untitled")
-                    lines.append(f"### {title_s}\n")
-                    content_s = _get_str(rd2, "content", "")
-                    lines.append(f"{content_s}\n")
+                    title = r.get("title", "Untitled")
+                    content = r.get("content", "")
+                    lines.append(f"### {title}\n")
+                    lines.append(f"{content}\n")
 
-    return "\n".join(lines)
+    return lines
 
 
-# ---------------------------------------------------------------------------
-# WorkflowEngine
-# ---------------------------------------------------------------------------
+class WorkflowExecutionError(Exception):
+    """Raised when workflow execution fails."""
 
 
 class WorkflowEngine:
@@ -278,137 +367,147 @@ class WorkflowEngine:
         state_manager: StateManager,
         agents: dict[str, Any],
         memory_config: MemoryConfig | None = None,
+        output_handler: OutputHandler | None = None,
     ) -> None:
         self._root = root
         self._state = state_manager
         self._agents = agents
         self._memory = MemoryManager(root, memory_config)
+        self._output_handler = output_handler or DefaultOutputHandler()
 
     async def run(self, workflow_name: str, inputs: dict[str, Any]) -> str:
         """Execute a named workflow with given inputs.
 
         Returns the task ID.
+
+        Raises WorkflowExecutionError if the workflow fails.
         """
         state = self._state.load()
         task = self._state.create_task(state, workflow_name)
         task_id = task.id
         self._state.save(state)
 
-        # Create task directory
         task_dir = self._root / ".autoresearch" / "tasks" / task_id
         task_dir.mkdir(parents=True, exist_ok=True)
 
         logger.info("workflow_started", workflow=workflow_name, task_id=task_id)
 
-        # Load workflow definition
         wf_path = _WORKFLOWS_DIR / f"{workflow_name}.yaml"
         if not wf_path.exists():
             raise FileNotFoundError(f"Workflow file not found: {wf_path}")
         wf = parse_workflow(wf_path)
 
-        # Resolve execution order
         order = resolve_order(wf.steps)
 
-        # Execute steps sequentially, collecting outputs
-        step_outputs: dict[str, dict[str, object]] = {}
+        step_outputs: dict[str, Any] = {}
+        typed_step_outputs: dict[str, dict[str, object]] = {}
         state = self._state.load()
 
-        for step_name in order:
-            step = wf.steps[step_name]
+        try:
+            for step_name in order:
+                step = wf.steps[step_name]
 
-            # Map step name to status transition
-            status = _step_to_status(step_name)
-            if status is not None:
-                try:
-                    self._state.transition(state, task_id, status)
-                    self._state.save(state)
-                except ValueError:
-                    # Transition may not be valid from current state; skip
-                    logger.warning(
-                        "state_transition_skipped",
-                        step=step_name,
-                        target=status.name,
-                    )
+                status = _step_to_status(step_name)
+                if status is not None:
+                    try:
+                        self._state.transition(state, task_id, status)
+                        self._state.save(state)
+                    except ValueError as e:
+                        logger.exception(
+                            "state_transition_failed",
+                            step=step_name,
+                            target=status.name,
+                        )
+                        state = self._state.load()
+                        self._state.transition(state, task_id, TaskStatus.FAILED)
+                        self._state.save(state)
+                        msg = f"Invalid state transition for step '{step_name}'"
+                        raise WorkflowExecutionError(msg) from e
 
-            # Build kwargs from inputs and prior step outputs
-            kwargs: dict[str, object] = {"prompt": step.prompt}
-            for dep in step.depends_on:
-                dep_outputs = step_outputs.get(dep, {})
-                kwargs.update(dep_outputs)
+                kwargs: dict[str, object] = {"prompt": step.prompt}
+                for dep in step.depends_on:
+                    dep_outputs = typed_step_outputs.get(dep, {})
+                    kwargs.update(dep_outputs)
 
-            # Add query/depth from top-level inputs for the plan step
-            if step_name == "plan":
-                kwargs["query"] = inputs.get("query", "")
-                kwargs["depth"] = inputs.get("depth", "standard")
+                if step_name == "plan":
+                    kwargs["query"] = inputs.get("query", "")
+                    kwargs["depth"] = inputs.get("depth", "standard")
 
-            # Execute step
-            agent = self._agents.get(step.agent)
-            if agent is None:
-                raise KeyError(f"No agent registered for step '{step_name}': '{step.agent}'")
-            logger.info("executing_step", step=step_name, agent=step.agent)
-            result = await agent.execute(str(task_dir), **kwargs)
-            step_outputs[step_name] = result
+                agent = self._get_agent(step.agent, step_name)
+                logger.info("executing_step", step=step_name, agent=step.agent)
+                result = await agent.execute(str(task_dir), **kwargs)
+                typed_step_outputs[step_name] = result
+                step_outputs[step_name] = convert_to_typed_output(step_name, result)
 
-        # Revision loop: if fact_check recommends "revise", re-run synthesize+fact_check
-        for _round in range(_MAX_REVISION_ROUNDS):
-            fc_output = step_outputs.get("fact_check", {})
-            if not isinstance(fc_output, dict):
-                break
-            if fc_output.get("recommendation") != "revise":
-                break
+            for _round in range(_MAX_REVISION_ROUNDS):
+                fc_output = step_outputs.get("fact_check")
+                if fc_output is None:
+                    break
+                if not isinstance(fc_output, FactCheckerOutput):
+                    break
+                if fc_output.recommendation != "revise":
+                    break
 
-            logger.info("revision_round", round=_round + 1)
+                logger.info("revision_round", round=_round + 1)
+                state = self._state.load()
+                self._state.transition(state, task_id, TaskStatus.REVISION)
+                self._state.save(state)
+
+                synth_step = wf.steps.get("synthesize")
+                if synth_step is not None:
+                    agent = self._agents.get(synth_step.agent)
+                    if agent is not None:
+                        kwargs = {"prompt": synth_step.prompt}
+                        for dep in synth_step.depends_on:
+                            dep_outputs = typed_step_outputs.get(dep, {})
+                            kwargs.update(dep_outputs)
+                        state = self._state.load()
+                        self._state.transition(state, task_id, TaskStatus.SYNTHESIZING)
+                        self._state.save(state)
+                        result = await agent.execute(str(task_dir), **kwargs)
+                        typed_step_outputs["synthesize"] = result
+                        step_outputs["synthesize"] = convert_to_typed_output("synthesize", result)
+
+                fc_step = wf.steps.get("fact_check")
+                if fc_step is not None:
+                    agent = self._agents.get(fc_step.agent)
+                    if agent is not None:
+                        kwargs = {"prompt": fc_step.prompt}
+                        for dep in fc_step.depends_on:
+                            dep_outputs = typed_step_outputs.get(dep, {})
+                            kwargs.update(dep_outputs)
+                        state = self._state.load()
+                        self._state.transition(state, task_id, TaskStatus.FACT_CHECKING)
+                        self._state.save(state)
+                        result = await agent.execute(str(task_dir), **kwargs)
+                        typed_step_outputs["fact_check"] = result
+                        step_outputs["fact_check"] = convert_to_typed_output("fact_check", result)
+
+            await _package_outputs_async(task_dir, step_outputs, workflow_name)
+
+            session_record = SessionRecord(
+                session_id=task_id,
+                task_id=task_id,
+                query=str(inputs.get("query", "")),
+                agent_outputs={k: convert_from_typed_output(v) for k, v in step_outputs.items()},
+            )
+            self._memory.save_session(session_record)
+            self._memory.maybe_summarize(task_id)
+
             state = self._state.load()
-            self._state.transition(state, task_id, TaskStatus.REVISION)
+            self._state.transition(state, task_id, TaskStatus.DONE)
             self._state.save(state)
 
-            # Re-run synthesize
-            synth_step = wf.steps.get("synthesize")
-            if synth_step is not None:
-                agent = self._agents.get(synth_step.agent)
-                if agent is not None:
-                    kwargs = {"prompt": synth_step.prompt}
-                    for dep in synth_step.depends_on:
-                        dep_outputs = step_outputs.get(dep, {})
-                        kwargs.update(dep_outputs)
-                    state = self._state.load()
-                    self._state.transition(state, task_id, TaskStatus.SYNTHESIZING)
-                    self._state.save(state)
-                    result = await agent.execute(str(task_dir), **kwargs)
-                    step_outputs["synthesize"] = result
-
-            # Re-run fact_check
-            fc_step = wf.steps.get("fact_check")
-            if fc_step is not None:
-                agent = self._agents.get(fc_step.agent)
-                if agent is not None:
-                    kwargs = {"prompt": fc_step.prompt}
-                    for dep in fc_step.depends_on:
-                        dep_outputs = step_outputs.get(dep, {})
-                        kwargs.update(dep_outputs)
-                    state = self._state.load()
-                    self._state.transition(state, task_id, TaskStatus.FACT_CHECKING)
-                    self._state.save(state)
-                    result = await agent.execute(str(task_dir), **kwargs)
-                    step_outputs["fact_check"] = result
-
-        # Package outputs
-        _package_outputs(task_dir, step_outputs, workflow_name)
-
-        # Record session in memory
-        session_record = SessionRecord(
-            session_id=task_id,
-            task_id=task_id,
-            query=str(inputs.get("query", "")),
-            agent_outputs={k: {kk: vv for kk, vv in v.items()} for k, v in step_outputs.items()},
-        )
-        self._memory.save_session(session_record)
-        self._memory.maybe_summarize(task_id)
-
-        # Transition to DONE
-        state = self._state.load()
-        self._state.transition(state, task_id, TaskStatus.DONE)
-        self._state.save(state)
+        except Exception as e:
+            logger.exception("workflow_failed", workflow=workflow_name, task_id=task_id)
+            state = self._state.load()
+            try:
+                self._state.transition(state, task_id, TaskStatus.FAILED)
+                self._state.save(state)
+            except ValueError:
+                pass
+            msg = f"Workflow '{workflow_name}' failed"
+            raise WorkflowExecutionError(msg) from e
 
         logger.info("workflow_completed", workflow=workflow_name, task_id=task_id)
         return task_id
@@ -419,6 +518,14 @@ class WorkflowEngine:
         existing = [k for k in state.tasks if k.startswith(f"task-{date_str}")]
         seq = len(existing) + 1
         return f"task-{date_str}-{seq:03d}"
+
+    def _get_agent(self, agent_name: str, step_name: str) -> Any:
+        """Get an agent by name, raising KeyError if not found."""
+        agent = self._agents.get(agent_name)
+        if agent is None:
+            msg = f"No agent registered for step '{step_name}': '{agent_name}'"
+            raise KeyError(msg)
+        return agent
 
 
 def _step_to_status(step_name: str) -> TaskStatus | None:

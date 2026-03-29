@@ -8,8 +8,8 @@ Levels:
 
 from __future__ import annotations
 
-import pathlib
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import msgspec
@@ -35,7 +35,7 @@ class SessionRecord(msgspec.Struct):
 class MemoryManager:
     """Manages the three-level memory hierarchy under .autoresearch/memory/."""
 
-    def __init__(self, root: pathlib.Path, config: MemoryConfig | None = None) -> None:
+    def __init__(self, root: Path, config: MemoryConfig | None = None) -> None:
         self._root = root
         self._config = config or MemoryConfig()
         self._base = root / ".autoresearch" / "memory"
@@ -43,14 +43,10 @@ class MemoryManager:
         self._summaries_dir = self._base / "summaries"
         self._long_term_dir = self._base / "long-term"
 
-    # -- helpers -------------------------------------------------------------
-
     def _ensure_dirs(self) -> None:
         self._sessions_dir.mkdir(parents=True, exist_ok=True)
         self._summaries_dir.mkdir(parents=True, exist_ok=True)
         self._long_term_dir.mkdir(parents=True, exist_ok=True)
-
-    # -- session records -----------------------------------------------------
 
     def save_session(self, record: SessionRecord) -> None:
         """Persist a session record to disk."""
@@ -63,8 +59,11 @@ class MemoryManager:
         path = self._sessions_dir / f"{session_id}.json"
         if not path.exists():
             return None
-        data = orjson.loads(path.read_bytes())
-        return msgspec.convert(data, SessionRecord)
+        try:
+            data = orjson.loads(path.read_bytes())
+            return msgspec.convert(data, SessionRecord)
+        except (orjson.JSONDecodeError, msgspec.ValidationError, OSError):
+            return None
 
     def list_sessions(self, task_id: str | None = None) -> list[str]:
         """Return session IDs, optionally filtered by task_id."""
@@ -72,13 +71,14 @@ class MemoryManager:
             return []
         ids: list[str] = []
         for p in sorted(self._sessions_dir.glob("*.json")):
-            data = orjson.loads(p.read_bytes())
-            if task_id is not None and data.get("task_id") != task_id:
+            try:
+                data = orjson.loads(p.read_bytes())
+                if task_id is not None and data.get("task_id") != task_id:
+                    continue
+                ids.append(p.stem)
+            except (orjson.JSONDecodeError, OSError):
                 continue
-            ids.append(p.stem)
         return ids
-
-    # -- task summaries ------------------------------------------------------
 
     def summarize_task(self, task_id: str) -> None:
         """Generate a summary for a task by concatenating its session records."""
@@ -101,7 +101,6 @@ class MemoryManager:
         content = "\n".join(lines)
         summary_path = self._summaries_dir / f"{task_id}.md"
         summary_path.write_text(content, encoding="utf-8")
-        # Write metadata for retention tracking
         meta_path = self._summaries_dir / f"{task_id}.json"
         meta_path.write_bytes(
             orjson.dumps(
@@ -116,8 +115,6 @@ class MemoryManager:
         if not path.exists():
             return None
         return path.read_text(encoding="utf-8")
-
-    # -- long-term memory ----------------------------------------------------
 
     def store_long_term(self, key: str, content: str) -> None:
         """Store or overwrite a long-term memory entry."""
@@ -138,8 +135,6 @@ class MemoryManager:
             return []
         return sorted(p.stem for p in self._long_term_dir.glob("*.md"))
 
-    # -- auto-summarization --------------------------------------------------
-
     def maybe_summarize(self, task_id: str) -> None:
         """Summarize a task if auto_summarize is enabled and session threshold is met."""
         if not self._config.auto_summarize:
@@ -148,8 +143,6 @@ class MemoryManager:
         if len(session_ids) >= self._config.summarize_after_sessions:
             self.summarize_task(task_id)
 
-    # -- retention cleanup ---------------------------------------------------
-
     def cleanup_expired(self, retention_days: int | None = None) -> None:
         """Remove session and summary files older than *retention_days*."""
         days = retention_days if retention_days is not None else self._config.retention_days
@@ -157,28 +150,34 @@ class MemoryManager:
 
         if self._sessions_dir.exists():
             for p in self._sessions_dir.glob("*.json"):
-                data = orjson.loads(p.read_bytes())
-                ts_str = data.get("timestamp", "")
-                if not ts_str:
+                try:
+                    data = orjson.loads(p.read_bytes())
+                    ts_str = data.get("timestamp", "")
+                    if not ts_str:
+                        continue
+                    ts = datetime.fromisoformat(ts_str)
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=UTC)
+                    if ts < cutoff:
+                        p.unlink()
+                except (orjson.JSONDecodeError, ValueError, OSError):
                     continue
-                ts = datetime.fromisoformat(ts_str)
-                if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=UTC)
-                if ts < cutoff:
-                    p.unlink()
 
         if self._summaries_dir.exists():
             for meta_path in self._summaries_dir.glob("*.json"):
-                data = orjson.loads(meta_path.read_bytes())
-                ts_str = data.get("created_at", "")
-                if not ts_str:
+                try:
+                    data = orjson.loads(meta_path.read_bytes())
+                    ts_str = data.get("created_at", "")
+                    if not ts_str:
+                        continue
+                    ts = datetime.fromisoformat(ts_str)
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=UTC)
+                    if ts < cutoff:
+                        stem = meta_path.stem
+                        md_path = self._summaries_dir / f"{stem}.md"
+                        if md_path.exists():
+                            md_path.unlink()
+                        meta_path.unlink()
+                except (orjson.JSONDecodeError, ValueError, OSError):
                     continue
-                ts = datetime.fromisoformat(ts_str)
-                if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=UTC)
-                if ts < cutoff:
-                    stem = meta_path.stem
-                    md_path = self._summaries_dir / f"{stem}.md"
-                    if md_path.exists():
-                        md_path.unlink()
-                    meta_path.unlink()

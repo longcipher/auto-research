@@ -885,15 +885,8 @@ When the user asks you to research a topic, use the autoresearch CLI:
 
 ## Quick Research
 
-```bash
-autoresearch run "your research query" --depth quick --json
+    autoresearch run "your research query" --depth quick --json
 ```
-```
-
-
-```text
-
-```text
 
 ## Deep Research
 

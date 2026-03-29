@@ -6,7 +6,11 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+import msgspec
+
 from autoresearch.agents.base import BaseAgent
+from autoresearch.engine.io import async_write_text
+from autoresearch.models.agent_outputs import PlannerOutput
 from autoresearch.models.types import AgentRole, ResearchDepth
 
 if TYPE_CHECKING:
@@ -47,18 +51,17 @@ class PlannerAgent(BaseAgent):
             output_format=output_format,
             depth_label=depth_label,
         )
-        brief_path.write_text(brief_content, encoding="utf-8")
+        await async_write_text(brief_path, brief_content, encoding="utf-8")
 
-        return {
-            "brief_path": str(brief_path),
-            "sub_questions": sub_questions,
-            "search_queries": search_queries,
-            "depth": depth,
-            "output_format": output_format,
-        }
+        output = PlannerOutput(
+            brief_path=str(brief_path),
+            sub_questions=sub_questions,
+            search_queries=search_queries,
+            depth=depth,
+            output_format=output_format,
+        )
+        return msgspec.to_builtins(output)
 
-
-# ── Helpers ─────────────────────────────────────────────────────────────
 
 _MAX_SUB_QUESTIONS = 5
 _MIN_SUB_QUESTIONS = 3
@@ -84,7 +87,6 @@ def _derive_sub_questions(query: str) -> list[str]:
 
 def _extract_topic(query: str) -> str:
     """Extract a simple topic phrase from *query*."""
-    # Remove common question words and punctuation
     cleaned = re.sub(
         r"^(what|how|why|when|where|who|is|are|does|do|can|could|would|should)\s+",
         "",

@@ -5,7 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import msgspec
+
 from autoresearch.agents.base import BaseAgent
+from autoresearch.engine.io import async_write_text
+from autoresearch.models.agent_outputs import SynthesizerOutput
 from autoresearch.models.types import ReportTemplate
 from autoresearch.templates import render_report
 
@@ -53,13 +57,14 @@ class SynthesizerAgent(BaseAgent):
         markdown = render_report(template=template, topic=topic, readings=readings)
 
         draft_path = Path(task_dir) / "draft.md"
-        draft_path.write_text(markdown, encoding="utf-8")
+        await async_write_text(draft_path, markdown, encoding="utf-8")
 
-        return {
-            "draft_path": str(draft_path),
-            "template": _TEMPLATE_NAMES.get(template, "general"),
-            "sources_count": len(readings),
-        }
+        output = SynthesizerOutput(
+            draft_path=str(draft_path),
+            template=_TEMPLATE_NAMES.get(template, "general"),
+            sources_count=len(readings),
+        )
+        return msgspec.to_builtins(output)
 
 
 def _extract_readings(raw: object) -> list[dict[str, Any]]:

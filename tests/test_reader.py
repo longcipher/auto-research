@@ -55,7 +55,7 @@ class TestExtractionResult:
             extracted_at="2026-01-01T00:00:00Z",
         )
         with pytest.raises(AttributeError):
-            setattr(result, "url", "other")
+            result.url = "other"  # ty: ignore[invalid-assignment]
 
 
 class TestURLExtractTool:

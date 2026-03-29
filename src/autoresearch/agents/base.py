@@ -33,7 +33,7 @@ class BaseAgent(abc.ABC):
     async def execute(self, task_dir: str, **kwargs: Any) -> dict[str, Any]:
         """Execute this agent's phase of the research pipeline.
 
-        Returns a dict of outputs that the Planner uses to decide next steps.
+        Returns a dict of outputs for backward compatibility.
         """
         ...
 

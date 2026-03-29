@@ -6,9 +6,12 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import msgspec
 import orjson
 
 from autoresearch.agents.base import BaseAgent
+from autoresearch.engine.io import async_mkdir, async_write_bytes
+from autoresearch.models.agent_outputs import ReaderOutput
 from autoresearch.tools.url_extract import URLExtractTool
 
 if TYPE_CHECKING:
@@ -44,7 +47,7 @@ class ReaderAgent(BaseAgent):
             urls = [str(u) for u in urls_raw]
 
         readings_dir = Path(task_dir) / "readings"
-        readings_dir.mkdir(parents=True, exist_ok=True)
+        await async_mkdir(readings_dir, parents=True, exist_ok=True)
 
         readings: list[dict[str, Any]] = []
 
@@ -60,13 +63,15 @@ class ReaderAgent(BaseAgent):
 
             slug = _slugify_url(url)
             file_path = readings_dir / f"{slug}.json"
-            file_path.write_bytes(orjson.dumps(note, option=orjson.OPT_INDENT_2))
+            await async_write_bytes(file_path, orjson.dumps(note, option=orjson.OPT_INDENT_2))
 
-        return {
-            "readings": readings,
-            "total_count": len(readings),
-            "urls_processed": len(urls),
-        }
+        output = ReaderOutput(
+            readings=readings,
+            pages_read=len(readings),
+            total_count=len(readings),
+            urls_processed=len(readings),
+        )
+        return msgspec.to_builtins(output)
 
 
 def _slugify_url(url: str) -> str:

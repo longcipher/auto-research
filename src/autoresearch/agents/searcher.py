@@ -6,9 +6,12 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import msgspec
 import orjson
 
 from autoresearch.agents.base import BaseAgent
+from autoresearch.engine.io import async_mkdir, async_write_bytes
+from autoresearch.models.agent_outputs import SearcherOutput
 from autoresearch.tools.web_search import WebSearchTool
 
 if TYPE_CHECKING:
@@ -46,7 +49,7 @@ class SearcherAgent(BaseAgent):
         max_results: int = int(str(kwargs.get("max_results", 5)))
 
         results_dir = Path(task_dir) / "search-results"
-        results_dir.mkdir(parents=True, exist_ok=True)
+        await async_mkdir(results_dir, parents=True, exist_ok=True)
 
         all_results: dict[str, list[dict[str, Any]]] = {}
         total_count = 0
@@ -67,13 +70,14 @@ class SearcherAgent(BaseAgent):
 
             slug = _slugify_query(query)
             file_path = results_dir / f"{slug}.json"
-            file_path.write_bytes(orjson.dumps(result_dicts, option=orjson.OPT_INDENT_2))
+            await async_write_bytes(file_path, orjson.dumps(result_dicts, option=orjson.OPT_INDENT_2))
 
-        return {
-            "results": all_results,
-            "total_count": total_count,
-            "queries_processed": len(queries),
-        }
+        output = SearcherOutput(
+            results=all_results,
+            total_count=total_count,
+            queries_processed=len(queries),
+        )
+        return msgspec.to_builtins(output)
 
 
 def _slugify_query(query: str) -> str:

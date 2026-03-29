@@ -6,7 +6,11 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import msgspec
+
 from autoresearch.agents.base import BaseAgent
+from autoresearch.engine.io import async_read_text, async_write_text
+from autoresearch.models.agent_outputs import FactCheckerOutput
 
 if TYPE_CHECKING:
     from autoresearch.config.schema import AgentConfig
@@ -25,9 +29,7 @@ class Claim:
         self.line_number = line_number
 
 
-# Matches [1], [2], [10], etc.
 _BRACKET_CITATION = re.compile(r"([^\n]*?\[\d+\][^\n]*)", re.MULTILINE)
-# Matches (Source: ...)
 _SOURCE_CITATION = re.compile(r"([^\n]*?\(Source:[^)]*\)[^\n]*)", re.MULTILINE)
 
 
@@ -46,7 +48,6 @@ def extract_claims(draft: str) -> list[Claim]:
         if not stripped:
             continue
 
-        # Check bracket citations: [1], [2], etc.
         bracket_matches = re.findall(r"\[(\d+)\]", stripped)
         for ref_num in bracket_matches:
             source = f"[{ref_num}]"
@@ -62,7 +63,6 @@ def extract_claims(draft: str) -> list[Claim]:
                     )
                 )
 
-        # Check (Source: ...) citations
         source_matches = re.findall(r"\(Source:[^)]*\)", stripped)
         for src in source_matches:
             key = f"{stripped}:{src}"
@@ -158,25 +158,29 @@ class FactCheckerAgent(BaseAgent):
         if not draft_path.exists():
             raise FileNotFoundError(f"Draft not found: {draft_path}")
 
-        draft_text = draft_path.read_text(encoding="utf-8")
+        draft_text = await async_read_text(draft_path, encoding="utf-8")
         claims = extract_claims(draft_text)
 
         report = _build_report(claims)
 
         report_path = Path(task_dir) / "fact-check.md"
-        report_path.write_text(report, encoding="utf-8")
+        await async_write_text(report_path, report, encoding="utf-8")
 
         verified = sum(1 for c in claims if c.status == "verified")
         disputed = sum(1 for c in claims if c.status == "disputed")
         unverifiable = sum(1 for c in claims if c.status == "unverifiable")
         outdated = sum(1 for c in claims if c.status == "outdated")
+        verified_claims = [c.text for c in claims if c.status == "verified"]
 
-        return {
-            "report_path": str(report_path),
-            "total_claims": len(claims),
-            "verified": verified,
-            "disputed": disputed,
-            "unverifiable": unverifiable,
-            "outdated": outdated,
-            "recommendation": "revise" if disputed > 0 else "proceed",
-        }
+        output = FactCheckerOutput(
+            recommendation="revise" if disputed > 0 else "proceed",
+            issues=[c.text for c in claims if c.status == "disputed"],
+            verified_claims=verified_claims,
+            report_path=str(report_path),
+            total_claims=len(claims),
+            verified=verified,
+            disputed=disputed,
+            unverifiable=unverifiable,
+            outdated=outdated,
+        )
+        return msgspec.to_builtins(output)

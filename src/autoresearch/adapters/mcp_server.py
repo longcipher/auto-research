@@ -32,13 +32,15 @@ def create_server() -> FastMCP:
                 {"error": f"Invalid depth '{depth}'. Must be one of: {', '.join(VALID_DEPTHS)}"}
             ).decode()
 
-        from autoresearch.cli import _build_agents_from_config
+        from autoresearch.config.loader import load_config
+        from autoresearch.engine.factory import build_agents_from_config
         from autoresearch.engine.state import StateManager
         from autoresearch.engine.workflow import WorkflowEngine
 
         root = pathlib.Path.cwd()
         manager = StateManager(root)
-        agents = _build_agents_from_config()
+        config = load_config()
+        agents = build_agents_from_config(config.agents)
         engine = WorkflowEngine(root=root, state_manager=manager, agents=agents)
 
         workflow_name = "quick-scan" if depth == "quick" else "deep-research"

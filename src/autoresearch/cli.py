@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import pathlib
+from typing import TYPE_CHECKING
 
 import click
 import orjson
@@ -11,6 +12,9 @@ import orjson
 from autoresearch.adapters.host_detect import detect_host, get_skill_content, get_skill_filename
 from autoresearch.config.loader import load_config, validate_config
 from autoresearch.config.sod import validate_sod
+
+if TYPE_CHECKING:
+    from autoresearch.agents.base import BaseAgent
 
 VERSION = "0.1.0"
 
@@ -68,35 +72,13 @@ def validate() -> None:
     click.echo("Configuration is valid")
 
 
-def _build_agents_from_config() -> dict[str, object]:
+def _build_agents_from_config() -> dict[str, BaseAgent]:
     """Build agent instances from the loaded configuration."""
-    from autoresearch.agents.fact_checker import FactCheckerAgent
-    from autoresearch.agents.planner import PlannerAgent
-    from autoresearch.agents.reader import ReaderAgent
-    from autoresearch.agents.searcher import SearcherAgent
-    from autoresearch.agents.synthesizer import SynthesizerAgent
     from autoresearch.config.loader import load_config
-    from autoresearch.config.schema import AgentConfig
-    from autoresearch.models.types import AgentRole
+    from autoresearch.engine.factory import build_agents_from_config
 
     config = load_config()
-
-    agent_classes: dict[str, tuple[type, AgentRole]] = {
-        "planner": (PlannerAgent, AgentRole.PLANNER),
-        "searcher": (SearcherAgent, AgentRole.SEARCHER),
-        "reader": (ReaderAgent, AgentRole.READER),
-        "synthesizer": (SynthesizerAgent, AgentRole.SYNTHESIZER),
-        "fact_checker": (FactCheckerAgent, AgentRole.FACT_CHECKER),
-    }
-
-    agents: dict[str, object] = {}
-    for name, (cls, role) in agent_classes.items():
-        agent_cfg = config.agents.get(name, AgentConfig())
-        if not agent_cfg.enabled:
-            continue
-        agents[name] = cls(role=role, config=agent_cfg)
-
-    return agents
+    return build_agents_from_config(config.agents)
 
 
 @cli.command()
