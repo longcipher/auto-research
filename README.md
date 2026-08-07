@@ -187,7 +187,6 @@ src/autoresearch/
 
 workflows/           # YAML workflow definitions
 tests/               # pytest tests + Hypothesis property tests
-features/            # Gherkin BDD scenarios
 ```
 
 ## Development
@@ -197,8 +196,7 @@ just setup        # Install dependencies + tools
 just format       # Format code (ruff + rumdl)
 just lint         # Lint (ruff, ty, typos, rumdl)
 just test         # Run pytest
-just bdd          # Run behave BDD scenarios
-just test-all     # pytest + behave
+just test-all     # pytest
 just typecheck    # ty type checking
 just bench        # pytest benchmarks
 just build        # uv build
@@ -213,7 +211,7 @@ just build        # uv build
 - **HTTP:** httpx
 - **MCP:** mcp SDK (FastMCP)
 - **Logging:** structlog
-- **Testing:** pytest, behave, Hypothesis
+- **Testing:** pytest, Hypothesis
 - **Linting:** ruff, ty
 
 ## License

@@ -172,7 +172,7 @@ cachetools >= 7.0.5
 - Lint with `ruff` — all code must pass `ruff check` with zero errors.
 - Format with `ruff format` — consistent style, no debates.
 - Type check with `ty` — all code must pass `ty check` with zero errors.
-- Use Gherkin + `behave` for outer-loop acceptance tests.
+
 - Use `pytest` for inner-loop TDD — tests must pass before claiming completion.
 - Use Hypothesis under `tests/` when you need generated coverage for invariants; these tests must run through the normal `uv run pytest` path.
 - Use `pytest-benchmark` for performance-sensitive code.
@@ -214,7 +214,6 @@ After each feature or bug fix, run:
 just format
 just lint
 just test
-just bdd
 just test-all
 ```
 
@@ -222,8 +221,8 @@ If any command fails, report the failure and do not claim completion.
 
 ## Testing Requirements
 
-- BDD scenarios: place Gherkin features under `features/` and step definitions under `features/steps/`.
-- Use BDD to define acceptance behavior first, then use `pytest` for the inner TDD loop.
+
+
 - Keep example-based and Hypothesis-based tests together under `tests/`; `just test` must exercise both without a separate property-test command.
 - Unit tests: place in `tests/` mirroring the source structure.
 - Integration tests: place in `tests/integration/`.

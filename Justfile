@@ -29,14 +29,9 @@ lint:
 test:
   uv run pytest
 
-# Run BDD scenarios
-bdd:
-  uv run behave
-
-# Run both TDD and BDD suites
+# Run all tests
 test-all:
   uv run pytest
-  uv run behave
 
 # Run tests with coverage
 test-coverage:
